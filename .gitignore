@@ -1,0 +1,24 @@
+# Скомпилированные бинарники (та самая проблема с outbox-worker, что уже случалась)
+order-service/cmd/*/order-service
+order-service/cmd/*/outbox-worker
+api-gateway/cmd/*/gateway
+inventory-service/cmd/*/inventory-service
+inventory-service/cmd/*/inventory-outbox-worker
+notification-service/cmd/*/notification-service
+
+# На всякий случай — любые бинарники без расширения в cmd/
+**/cmd/**/*
+!**/cmd/**/*.go
+!**/cmd/**/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Локальные env-файлы (если заведёшь .env вместо переменных в docker-compose)
+.env
+.env.local
+
+# Swagger — генерируемые файлы, можно исключить и перегенерировать по необходимости,
+# либо оставить закоммиченными для удобства (обсудим отдельно)

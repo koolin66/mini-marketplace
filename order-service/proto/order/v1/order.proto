@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package order.v1;
+
+option go_package = "order-service/proto/order/v1;orderv1";
+
+import "google/protobuf/timestamp.proto";
+
+// OrderService — контракт, который Gateway использует как gRPC-клиент,
+// а Order Service реализует как gRPC-сервер.
+service OrderService {
+  rpc CreateOrder(CreateOrderRequest) returns (OrderResponse);
+  rpc GetOrder(GetOrderRequest) returns (OrderResponse);
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+}
+
+message Money {
+  int64 amount = 1;   // минимальные единицы (центы), как в domain.Money
+  string currency = 2;
+}
+
+message OrderItem {
+  string sku = 1;
+  string name = 2;
+  Money price = 3;
+  int32 quantity = 4;
+}
+
+message CreateOrderRequest {
+  string customer_id = 1;
+  repeated OrderItem items = 2;
+}
+
+message GetOrderRequest {
+  string id = 1;
+}
+
+message ListOrdersRequest {
+  string customer_id = 1;
+  string cursor = 2;
+  int32 limit = 3;
+}
+
+message OrderResponse {
+  string id = 1;
+  string customer_id = 2;
+  repeated OrderItem items = 3;
+  Money total_cost = 4;
+  string status = 5;
+  int32 version = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+message ListOrdersResponse {
+  repeated OrderResponse orders = 1;
+  string next_cursor = 2;
+}

@@ -1,0 +1,190 @@
+basePath: /api/v1
+definitions:
+  http.createOrderItemRequest:
+    properties:
+      currency:
+        type: string
+      name:
+        type: string
+      price:
+        type: integer
+      quantity:
+        type: integer
+      sku:
+        type: string
+    required:
+    - currency
+    - name
+    - price
+    - quantity
+    - sku
+    type: object
+  http.createOrderRequest:
+    properties:
+      customer_id:
+        type: string
+      items:
+        items:
+          $ref: '#/definitions/http.createOrderItemRequest'
+        minItems: 1
+        type: array
+    required:
+    - customer_id
+    - items
+    type: object
+  http.listOrdersResponse:
+    properties:
+      next_cursor:
+        type: string
+      orders:
+        items:
+          $ref: '#/definitions/http.orderResponse'
+        type: array
+    type: object
+  http.orderItemResponse:
+    properties:
+      currency:
+        type: string
+      name:
+        type: string
+      price:
+        type: integer
+      quantity:
+        type: integer
+      sku:
+        type: string
+    type: object
+  http.orderResponse:
+    properties:
+      created_at:
+        description: RFC3339, конвертируем сами из timestamppb
+        type: string
+      currency:
+        type: string
+      customer_id:
+        type: string
+      id:
+        type: string
+      items:
+        items:
+          $ref: '#/definitions/http.orderItemResponse'
+        type: array
+      status:
+        type: string
+      total_cost:
+        type: integer
+      updated_at:
+        type: string
+      version:
+        type: integer
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: API Gateway для системы обработки заказов — создание, получение и листинг
+    заказов.
+  title: Mini-Marketplace API
+  version: "1.0"
+paths:
+  /orders:
+    get:
+      description: Возвращает заказы клиента с курсорной пагинацией.
+      parameters:
+      - description: ID клиента (UUID)
+        in: query
+        name: customer_id
+        required: true
+        type: string
+      - description: Курсор пагинации (из предыдущего ответа)
+        in: query
+        name: cursor
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/http.listOrdersResponse'
+        "400":
+          description: customer_id не указан
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: внутренняя ошибка
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Список заказов клиента
+      tags:
+      - orders
+    post:
+      consumes:
+      - application/json
+      description: Создаёт заказ и запускает Saga-процесс резервирования товара через
+        Inventory Service.
+      parameters:
+      - description: Данные заказа
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/http.createOrderRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/http.orderResponse'
+        "400":
+          description: невалидные данные запроса
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: внутренняя ошибка
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Создать новый заказ
+      tags:
+      - orders
+  /orders/{id}:
+    get:
+      description: Возвращает данные заказа. Использует cache-aside через Redis (TTL
+        5с).
+      parameters:
+      - description: ID заказа (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/http.orderResponse'
+        "404":
+          description: заказ не найден
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: внутренняя ошибка
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Получить заказ по ID
+      tags:
+      - orders
+swagger: "2.0"

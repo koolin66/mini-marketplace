@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	swaggerFiles "github.com/swaggo/files"
@@ -61,6 +62,11 @@ func main() {
 	router := gin.Default()
 	router.Use(middleware.RateLimit(limiter))                                 // НОВОЕ: применяется ко ВСЕМ роутам глобально
 	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler)) // НОВОЕ
+	router.Use(middleware.Metrics())                                          // НОВОЕ: метрики считаются для ВСЕХ роутов
+
+	// НОВОЕ: эндпоинт, который Prometheus будет периодически скрейпить (обычно раз в 15с).
+	// promhttp.Handler() отдаёт все зарегистрированные метрики в текстовом формате Prometheus.
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	v1 := router.Group("/api/v1")
 	orderHandler.RegisterRoutes(v1)

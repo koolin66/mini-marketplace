@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"inventory-service/internal/consumer"
+	"inventory-service/internal/metrics"
 	"inventory-service/internal/repository/postgres"
 	"inventory-service/internal/usecase"
 )
@@ -38,6 +39,9 @@ func main() {
 	inventoryUC := usecase.NewInventoryUseCase(stockRepo)
 	orderConsumer := consumer.NewOrderCreatedConsumer(kafkaBrokers, consumerGroup, inventoryUC)
 	defer orderConsumer.Close()
+
+	metricsServer := metrics.StartServer(getEnv("METRICS_PORT_ADDR", ":9100")) // НОВОЕ
+	defer metricsServer.Shutdown(context.Background())
 
 	log.Println("inventory-service started")
 	orderConsumer.Run(ctx) // блокируется до отмены ctx

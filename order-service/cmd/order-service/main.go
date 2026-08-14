@@ -4,6 +4,7 @@ import (
 	"KolinMarket/internal/consumer"
 	grpcdelivery "KolinMarket/internal/delivery/grpc"
 	deliveryhttp "KolinMarket/internal/delivery/http"
+	"KolinMarket/internal/interceptor"
 	"KolinMarket/internal/repository/postgres"
 	"KolinMarket/internal/usecase"
 	orderv1 "KolinMarket/proto/order/v1"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 )
 
@@ -47,6 +49,7 @@ func main() {
 
 	orderHandler := deliveryhttp.NewOrderHandler(orderUC)
 	router := gin.Default()
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	v1 := router.Group("api/v1")
 	orderHandler.RegisterRoutes(v1)
 
@@ -62,7 +65,9 @@ func main() {
 		}
 	}()
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(interceptor.MetricsUnaryInterceptor),
+	)
 	orderGRPCServer := grpcdelivery.NewOrderGRPCServer(orderUC)
 	orderv1.RegisterOrderServiceServer(grpcServer, orderGRPCServer)
 

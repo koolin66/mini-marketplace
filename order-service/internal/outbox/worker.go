@@ -2,6 +2,7 @@ package outbox
 
 import (
 	"KolinMarket/internal/domain"
+	"KolinMarket/internal/metrics"
 	"context"
 	"log"
 	"time"
@@ -101,7 +102,14 @@ func (w *Worker) processBatch(ctx context.Context) error {
 		}
 	}
 
-	return tx.Commit(ctx) // НОВОЕ: коммитим только если ВСЕ записи батча успешно опубликованы и помечены
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	w.updateBacklogMetric(ctx)
+
+	return nil
+
 }
 
 // fetchPendingTx — ИЗМЕНЕНО: было fetchPending(ctx) с w.pool.Query,
@@ -154,4 +162,14 @@ func (w *Worker) transitionToAwaitingStockTx(ctx context.Context, tx pgx.Tx, ord
 		WHERE id = $3 AND status = $4
 	`, domain.StatusAwaitingStock, time.Now().UTC(), orderID, domain.StatusCreated)
 	return err
+}
+
+func (w *Worker) updateBacklogMetric(ctx context.Context) {
+	var count int
+	err := w.pool.QueryRow(ctx, `SELECT COUNT(*) FROM outbox WHERE status = 'PENDING'`).Scan(&count)
+	if err != nil {
+		log.Printf("outbox worker: failed to update backlog metric: %v", err)
+		return
+	}
+	metrics.OutboxPendingRecords.Set(float64(count))
 }

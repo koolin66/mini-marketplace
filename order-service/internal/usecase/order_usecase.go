@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"KolinMarket/internal/domain"
+	"KolinMarket/internal/metrics"
 	"KolinMarket/internal/ports"
 )
 
@@ -43,6 +44,8 @@ func (uc *orderUseCase) CreateOrder(ctx context.Context, input ports.CreateOrder
 	if err := uc.repo.SaveWithEvent(ctx, order, domain.EventTypeOrderCreated, payload); err != nil {
 		return nil, fmt.Errorf("save order: %w", err)
 	}
+
+	metrics.OrdersCreatedTotal.Inc()
 
 	return order, nil
 }

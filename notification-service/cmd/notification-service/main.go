@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"notification-service/internal/consumer"
+	"notification-service/internal/metrics"
 	"notification-service/internal/repository/postgres"
 	"notification-service/internal/usecase"
 )
@@ -37,6 +38,9 @@ func main() {
 	notificationUC := usecase.NewNotificationUseCase(inboxRepo)
 	eventsConsumer := consumer.NewOrderEventsConsumer(kafkaBrokers, consumerGroup, notificationUC)
 	defer eventsConsumer.Close()
+
+	metricsServer := metrics.StartServer(getEnv("METRICS_PORT_ADDR", ":9102")) // НОВОЕ
+	defer metricsServer.Shutdown(context.Background())
 
 	log.Println("notification-service started")
 	eventsConsumer.Run(ctx)

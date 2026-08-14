@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"inventory-service/internal/metrics"
 	"inventory-service/internal/outbox"
 )
 
@@ -35,6 +36,9 @@ func main() {
 	defer publisher.Close()
 
 	worker := outbox.NewWorker(pool, publisher, 1*time.Second, 20)
+
+	metricsServer := metrics.StartServer(getEnv("METRICS_PORT_ADDR", ":9101")) // НОВОЕ — другой порт!
+	defer metricsServer.Shutdown(context.Background())
 
 	log.Println("inventory outbox worker started")
 	worker.Run(ctx)

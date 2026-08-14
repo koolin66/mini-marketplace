@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 
 	"inventory-service/internal/domain"
+	"inventory-service/internal/metrics"
 	"inventory-service/internal/ports"
 )
 
@@ -85,6 +87,8 @@ func (c *OrderCreatedConsumer) Run(ctx context.Context) {
 }
 
 func (c *OrderCreatedConsumer) handleMessage(ctx context.Context, msg kafka.Message) error {
+	start := time.Now()
+
 	var event OrderCreatedEvent
 	if err := json.Unmarshal(msg.Value, &event); err != nil {
 		// Сообщение пришло в формате, который мы не можем распарсить — это "poison pill"
@@ -92,6 +96,9 @@ func (c *OrderCreatedConsumer) handleMessage(ctx context.Context, msg kafka.Mess
 		// Логируем как критическую проблему, но НЕ ретраим бесконечно — considerations
 		// про dead-letter queue см. ниже в вопросе.
 		log.Printf("order.created consumer: failed to unmarshal message: %v", err)
+
+		metrics.MessagesProcessedTotal.WithLabelValues("unmarshal_error").Inc()
+
 		return nil // возвращаем nil, чтобы offset закоммитился, и мы не застряли на этом сообщении навсегда
 	}
 
@@ -102,15 +109,19 @@ func (c *OrderCreatedConsumer) handleMessage(ctx context.Context, msg kafka.Mess
 
 	err := c.uc.ReserveStock(ctx, event.OrderID, items)
 
+	metrics.MessageProcessingDuration.Observe(time.Since(start).Seconds())
+
 	switch {
 	case err == nil:
 		log.Printf("order.created consumer: reserved stock for order %s", event.OrderID)
+		metrics.MessagesProcessedTotal.WithLabelValues("reserved").Inc()
 		return nil
 
 	case errors.Is(err, ports.ErrAlreadyProcessed):
 		// Дубликат — не ошибка, просто идемпотентный no-op. Логируем на всякий случай,
 		// но не считаем это проблемой, коммитим offset как обычно.
 		log.Printf("order.created consumer: order %s already processed, skipping", event.OrderID)
+		metrics.MessagesProcessedTotal.WithLabelValues("already_processed").Inc()
 		return nil
 
 	case errors.Is(err, domain.ErrInsufficientStock), errors.Is(err, domain.ErrStockNotFound):
@@ -118,11 +129,13 @@ func (c *OrderCreatedConsumer) handleMessage(ctx context.Context, msg kafka.Mess
 		// попытка ничего не изменит, пока кто-то не пополнит склад) и НЕ повод НЕ коммитить offset —
 		// мы обработали сообщение, просто с бизнес-результатом "отказ".
 		log.Printf("order.created consumer: insufficient stock for order %s: %v", event.OrderID, err)
+		metrics.MessagesProcessedTotal.WithLabelValues("insufficient_stock").Inc()
 		return nil
 
 	default:
 		// Инфраструктурная ошибка (БД недоступна и т.п.) — вот здесь ХОТИМ ретрай,
 		// поэтому возвращаем ошибку наверх в Run(), где offset НЕ будет закоммичен.
+		metrics.MessagesProcessedTotal.WithLabelValues("error").Inc()
 		return err
 	}
 }

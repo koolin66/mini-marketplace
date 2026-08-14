@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 
+	"notification-service/internal/metrics"
 	"notification-service/internal/ports"
 )
 
@@ -83,20 +85,28 @@ func (c *OrderEventsConsumer) consumeLoop(ctx context.Context, reader *kafka.Rea
 }
 
 func (c *OrderEventsConsumer) handleMessage(ctx context.Context, topic string, msg kafka.Message) error {
+	start := time.Now()
+
 	var event OrderEvent
 	if err := json.Unmarshal(msg.Value, &event); err != nil {
 		log.Printf("%s consumer: failed to unmarshal: %v", topic, err)
+		metrics.NotificationsProcessedTotal.WithLabelValues(topic, "unmarshal_error").Inc()
 		return nil // poison pill — коммитим и идём дальше
 	}
 
 	err := c.uc.Notify(ctx, event.OrderID, topic, event.Reason)
+
+	metrics.NotificationProcessingDuration.WithLabelValues(topic).Observe(time.Since(start).Seconds())
+
 	if err != nil {
 		if errors.Is(err, ports.ErrAlreadyProcessed) {
 			log.Printf("%s consumer: order %s already notified, skipping", topic, event.OrderID)
+			metrics.NotificationsProcessedTotal.WithLabelValues(topic, "already_processed").Inc()
 			return nil
 		}
+		metrics.NotificationsProcessedTotal.WithLabelValues(topic, "error").Inc()
 		return err // инфраструктурная ошибка — не коммитим, ретрай
 	}
-
+	metrics.NotificationsProcessedTotal.WithLabelValues(topic, "sent").Inc()
 	return nil
 }

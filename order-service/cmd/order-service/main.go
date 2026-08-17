@@ -5,11 +5,11 @@ import (
 	grpcdelivery "KolinMarket/internal/delivery/grpc"
 	deliveryhttp "KolinMarket/internal/delivery/http"
 	"KolinMarket/internal/interceptor"
+	"KolinMarket/internal/logger"
 	"KolinMarket/internal/repository/postgres"
 	"KolinMarket/internal/usecase"
 	orderv1 "KolinMarket/proto/order/v1"
 	"context"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -30,24 +30,30 @@ func main() {
 	grpcPort := getEnv("GRPC_PORT", "9091")
 	kafkaBrokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ",")
 	consumerGroup := getEnv("KAFKA_CONSUMER_GROUP", "order-service")
+	log := logger.New("order-service")
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM) // ИЗМЕНЕНО: используем NotifyContext вместо ручного signal.Notify, для единообразия с воркерами
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
-		log.Fatalf("Ошибка подключения к Postgres")
+		// ИЗМЕНЕНО: log.Fatalf не существует у slog.Logger — используем log.Error + os.Exit(1).
+		// slog сознательно не занимается завершением процесса, это отдельная ответственность.
+		log.Error("failed to connect to postgres", "error", err)
+		os.Exit(1)
 	}
 	defer pool.Close()
 
 	if err := pool.Ping(ctx); err != nil {
-		log.Fatalf("Неудачная проверка Postgres %v", err)
+		log.Error("failed to ping postgres", "error", err)
+		os.Exit(1)
 	}
 
-	orderRepo := postgres.NewOrderRepository(pool)
-	orderUC := usecase.NewOrderUseCase(orderRepo)
+	orderRepo := postgres.NewOrderRepository(pool, log)
+	orderUC := usecase.NewOrderUseCase(orderRepo, log)
 
-	orderHandler := deliveryhttp.NewOrderHandler(orderUC)
+	// ИЗМЕНЕНО: добавлен log третьим параметром — для единообразия DI по всему проекту
+	orderHandler := deliveryhttp.NewOrderHandler(orderUC, log)
 	router := gin.Default()
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	v1 := router.Group("api/v1")
@@ -59,51 +65,51 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Маркет слушает на:%s", httpPort)
-		if err := httpSrv.ListenAndServe(); err != nil {
-			log.Fatalf("Сервер: %v", err)
+		// ИЗМЕНЕНО: log.Printf -> log.Info с явным полем вместо интерполяции в строку
+		log.Info("http server listening", "port", httpPort)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("http server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	grpcServer := grpc.NewServer(
 		grpc.UnaryInterceptor(interceptor.MetricsUnaryInterceptor),
 	)
-	orderGRPCServer := grpcdelivery.NewOrderGRPCServer(orderUC)
+	orderGRPCServer := grpcdelivery.NewOrderGRPCServer(orderUC, log)
 	orderv1.RegisterOrderServiceServer(grpcServer, orderGRPCServer)
 
 	lis, err := net.Listen("tcp", ":"+grpcPort)
 	if err != nil {
-		log.Fatalf("ошибка прослушивания порта грпц: %v", err)
+		log.Error("failed to listen on grpc port", "error", err)
+		os.Exit(1)
 	}
 
 	go func() {
-		log.Printf("grpc сервер слуаешт на порту: %v", grpcPort)
+		log.Info("grpc server listening", "port", grpcPort)
 		if err := grpcServer.Serve(lis); err != nil {
-			log.Fatalf("grpc serve: %v", err)
+			log.Error("grpc serve failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
-	// --- НОВОЕ: Kafka consumer, слушающий stock.reserved/stock.failed
-	stockConsumer := consumer.NewStockResultConsumer(kafkaBrokers, consumerGroup, orderUC)
+	stockConsumer := consumer.NewStockResultConsumer(kafkaBrokers, consumerGroup, orderUC, log)
 	defer stockConsumer.Close()
 
 	go func() {
-		stockConsumer.Run(ctx) // блокируется до отмены ctx, но мы в отдельной горутине — не блокируем main
+		stockConsumer.Run(ctx)
 	}()
 
-	// --- Graceful shutdown
-	<-ctx.Done() // ИЗМЕНЕНО: раньше было signal.Notify + <-quit, теперь просто ждём отмены ctx
-
-	// quit := make(chan os.Signal, 1)
-	// signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	// <-quit
-	log.Printf("грейсфул шатдаун серверов...")
+	<-ctx.Done()
+	log.Info("shutting down servers")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("выключение сервера: %v", err)
+		// ИЗМЕНЕНО: было Fatalf (убивало процесс сразу) -> Error, чтобы дать шанс
+		// остальному коду graceful shutdown (gRPC) всё равно отработать.
+		log.Error("http server forced to shutdown", "error", err)
 	}
 
 	stopped := make(chan struct{})
@@ -114,15 +120,13 @@ func main() {
 
 	select {
 	case <-stopped:
-		log.Println("grpc server stopped gracefully")
+		log.Info("grpc server stopped gracefully")
 	case <-shutdownCtx.Done():
-		log.Println("grpc shutdown timed out, forcing stop")
+		log.Warn("grpc shutdown timed out, forcing stop")
 		grpcServer.Stop()
-
 	}
 
-	log.Println("сервер выключен успешно")
-
+	log.Info("server exited gracefully")
 }
 
 func getEnv(key, fallback string) string {

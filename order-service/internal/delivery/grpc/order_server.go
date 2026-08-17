@@ -6,6 +6,7 @@ import (
 	orderv1 "KolinMarket/proto/order/v1"
 	"context"
 	"errors"
+	"log/slog"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -14,11 +15,12 @@ import (
 
 type OrderGRPCServer struct {
 	orderv1.UnimplementedOrderServiceServer
-	uc ports.OrderUseCase
+	uc  ports.OrderUseCase
+	log *slog.Logger
 }
 
-func NewOrderGRPCServer(uc ports.OrderUseCase) *OrderGRPCServer {
-	return &OrderGRPCServer{uc: uc}
+func NewOrderGRPCServer(uc ports.OrderUseCase, log *slog.Logger) *OrderGRPCServer {
+	return &OrderGRPCServer{uc: uc, log: log}
 }
 
 func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *orderv1.CreateOrderRequest) (*orderv1.OrderResponse, error) {
@@ -30,7 +32,6 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *orderv1.CreateOr
 			Price:    domain.NewMoney(it.Price.Amount, it.Price.Currency),
 			Quantity: int(it.Quantity),
 		})
-
 	}
 
 	order, err := s.uc.CreateOrder(ctx, ports.CreateOrderInput{
@@ -38,7 +39,7 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *orderv1.CreateOr
 		Items:      items,
 	})
 	if err != nil {
-		return nil, mapDomainErrToGRPC(err)
+		return nil, s.mapDomainErrToGRPC(err, "CreateOrder") // ИЗМЕНЕНО: теперь метод (не функция), логирует внутри
 	}
 	return toOrderResponse(order), nil
 }
@@ -46,7 +47,7 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *orderv1.CreateOr
 func (s *OrderGRPCServer) GetOrder(ctx context.Context, req *orderv1.GetOrderRequest) (*orderv1.OrderResponse, error) {
 	order, err := s.uc.GetOrder(ctx, req.Id)
 	if err != nil {
-		return nil, mapDomainErrToGRPC(err)
+		return nil, s.mapDomainErrToGRPC(err, "GetOrder")
 	}
 	return toOrderResponse(order), nil
 }
@@ -54,7 +55,7 @@ func (s *OrderGRPCServer) GetOrder(ctx context.Context, req *orderv1.GetOrderReq
 func (s *OrderGRPCServer) ListOrders(ctx context.Context, req *orderv1.ListOrdersRequest) (*orderv1.ListOrdersResponse, error) {
 	orders, nextCursor, err := s.uc.ListOrders(ctx, req.CustomerId, req.Cursor, int(req.Limit))
 	if err != nil {
-		return nil, mapDomainErrToGRPC(err)
+		return nil, s.mapDomainErrToGRPC(err, "ListOrders")
 	}
 
 	resp := make([]*orderv1.OrderResponse, 0, len(orders))
@@ -68,7 +69,7 @@ func (s *OrderGRPCServer) ListOrders(ctx context.Context, req *orderv1.ListOrder
 	}, nil
 }
 
-func mapDomainErrToGRPC(err error) error {
+func (s *OrderGRPCServer) mapDomainErrToGRPC(err error, method string) error {
 	switch {
 	case errors.Is(err, domain.ErrEmptyItems):
 		return status.Error(codes.InvalidArgument, err.Error())
@@ -77,6 +78,7 @@ func mapDomainErrToGRPC(err error) error {
 	case errors.Is(err, domain.ErrOptimisticLock):
 		return status.Error(codes.Aborted, err.Error())
 	default:
+		s.log.Error("unhandled internal error", "error", err, "method", method)
 		return status.Error(codes.Internal, "internal error")
 	}
 }

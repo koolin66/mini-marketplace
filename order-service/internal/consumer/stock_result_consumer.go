@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 
 	"github.com/segmentio/kafka-go"
 
@@ -21,16 +21,14 @@ type StockFailedEvent struct {
 	Reason  string `json:"reason"`
 }
 
-// StockResultConsumer — слушает ДВА топика сразу: stock.reserved и stock.failed.
-// kafka-go Reader умеет слушать только один топик за раз, поэтому заведём два Reader'а
-// внутри одного consumer'а, оба пишут в общий usecase.
 type StockResultConsumer struct {
 	reservedReader *kafka.Reader
 	failedReader   *kafka.Reader
 	uc             ports.OrderUseCase
+	log            *slog.Logger
 }
 
-func NewStockResultConsumer(brokers []string, groupID string, uc ports.OrderUseCase) *StockResultConsumer {
+func NewStockResultConsumer(brokers []string, groupID string, uc ports.OrderUseCase, log *slog.Logger) *StockResultConsumer {
 	reservedReader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers: brokers,
 		Topic:   "stock.reserved",
@@ -46,6 +44,7 @@ func NewStockResultConsumer(brokers []string, groupID string, uc ports.OrderUseC
 		reservedReader: reservedReader,
 		failedReader:   failedReader,
 		uc:             uc,
+		log:            log,
 	}
 }
 
@@ -58,97 +57,102 @@ func (c *StockResultConsumer) Close() error {
 	return err2
 }
 
-// Run — запускает ДВЕ горутины, по одной на каждый топик, обе слушают параллельно.
 func (c *StockResultConsumer) Run(ctx context.Context) {
 	go c.runReserved(ctx)
 	go c.runFailed(ctx)
 
-	<-ctx.Done() // блокируем Run до отмены контекста, чтобы вызывающий main мог просто вызвать Run() и ждать
-	log.Println("stock result consumer: stopping")
+	<-ctx.Done()
+	c.log.Info("stopping")
 }
 
 func (c *StockResultConsumer) runReserved(ctx context.Context) {
-	log.Println("stock.reserved consumer started")
+	// НОВОЕ: .With("consumer", "stock.reserved") — создаёт логгер с привязанным полем,
+	// которое автоматически попадёт в КАЖДЫЙ вызов через него, без повторения в каждой строке.
+	log := c.log.With("consumer", "stock.reserved")
+	log.Info("started")
+
 	for {
 		msg, err := c.reservedReader.FetchMessage(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			log.Printf("stock.reserved consumer: fetch error: %v", err)
+			log.Warn("fetch error", "error", err)
 			continue
 		}
 
-		if err := c.handleReserved(ctx, msg); err != nil {
-			log.Printf("stock.reserved consumer: handle error: %v", err)
-			continue // offset не коммитим, ретрай на следующей итерации poll
+		if err := c.handleReserved(ctx, msg, log); err != nil {
+			log.Error("handle error", "error", err)
+			continue
 		}
 
 		if err := c.reservedReader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("stock.reserved consumer: commit error: %v", err)
+			log.Error("commit error", "error", err)
 		}
 	}
 }
 
 func (c *StockResultConsumer) runFailed(ctx context.Context) {
-	log.Println("stock.failed consumer started")
+	log := c.log.With("consumer", "stock.failed")
+	log.Info("started")
+
 	for {
 		msg, err := c.failedReader.FetchMessage(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			log.Printf("stock.failed consumer: fetch error: %v", err)
+			log.Warn("fetch error", "error", err) // ИСПРАВЛЕНО: было Error, для единообразия с runReserved
 			continue
 		}
 
-		if err := c.handleFailed(ctx, msg); err != nil {
-			log.Printf("stock.failed consumer: handle error: %v", err)
+		if err := c.handleFailed(ctx, msg, log); err != nil {
+			log.Error("handle error", "error", err)
 			continue
 		}
 
 		if err := c.failedReader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("stock.failed consumer: commit error: %v", err)
+			log.Error("commit error", "error", err) // ИСПРАВЛЕНО: было "handle error" — неверное сообщение, скопированное по ошибке
 		}
 	}
 }
 
-func (c *StockResultConsumer) handleReserved(ctx context.Context, msg kafka.Message) error {
+func (c *StockResultConsumer) handleReserved(ctx context.Context, msg kafka.Message, log *slog.Logger) error {
 	var event StockReservedEvent
 	if err := json.Unmarshal(msg.Value, &event); err != nil {
-		log.Printf("stock.reserved consumer: failed to unmarshal: %v", err)
+		log.Error("failed to unmarshal", "error", err)
 		return nil
 	}
 
-	err := c.uc.UpdateOrderStatus(ctx, event.OrderID, domain.StatusConfirmed, "") // ИЗМЕНЕНО: reason не нужен для CONFIRMED
+	err := c.uc.UpdateOrderStatus(ctx, event.OrderID, domain.StatusConfirmed, "")
 	if err != nil {
 		if errors.Is(err, domain.ErrInvalidTransition) {
-			log.Printf("stock.reserved consumer: order %s already in different state (likely duplicate): %v", event.OrderID, err)
+			log.Warn("order already in different state (likely duplicate)", "error", err, "order_id", event.OrderID) // ИСПРАВЛЕНО: было Error
 			return nil
 		}
 		return err
 	}
 
-	log.Printf("stock.reserved consumer: order %s confirmed", event.OrderID)
+	log.Info("order confirmed", "order_id", event.OrderID)
 	return nil
 }
 
-func (c *StockResultConsumer) handleFailed(ctx context.Context, msg kafka.Message) error {
+func (c *StockResultConsumer) handleFailed(ctx context.Context, msg kafka.Message, log *slog.Logger) error {
 	var event StockFailedEvent
 	if err := json.Unmarshal(msg.Value, &event); err != nil {
-		log.Printf("stock.failed consumer: failed to unmarshal: %v", err)
+		log.Error("failed to unmarshal", "error", err)
 		return nil
 	}
 
-	err := c.uc.UpdateOrderStatus(ctx, event.OrderID, domain.StatusCancelled, event.Reason) // ИЗМЕНЕНО: реальная причина из Inventory
+	err := c.uc.UpdateOrderStatus(ctx, event.OrderID, domain.StatusCancelled, event.Reason)
 	if err != nil {
 		if errors.Is(err, domain.ErrInvalidTransition) {
-			log.Printf("stock.failed consumer: order %s already in different state (likely duplicate): %v", event.OrderID, err)
+			log.Warn("order already in different state (likely duplicate)", "order_id", event.OrderID, "error", err) // ИСПРАВЛЕНО: было Error
 			return nil
 		}
 		return err
 	}
 
-	log.Printf("stock.failed consumer: order %s cancelled, reason: %s", event.OrderID, event.Reason)
+	log.Info("order cancelled", "order_id", event.OrderID, "reason", event.Reason)
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 
@@ -15,10 +16,11 @@ import (
 
 type orderUseCase struct {
 	repo ports.OrderRepository
+	log  *slog.Logger
 }
 
-func NewOrderUseCase(repo ports.OrderRepository) ports.OrderUseCase {
-	return &orderUseCase{repo: repo}
+func NewOrderUseCase(repo ports.OrderRepository, log *slog.Logger) ports.OrderUseCase {
+	return &orderUseCase{repo: repo, log: log}
 }
 
 func (uc *orderUseCase) CreateOrder(ctx context.Context, input ports.CreateOrderInput) (*domain.Order, error) {
@@ -97,9 +99,17 @@ func (uc *orderUseCase) UpdateOrderStatus(ctx context.Context, id string, newSta
 		}
 
 		if errors.Is(err, domain.ErrOptimisticLock) {
+			uc.log.Warn("optimistic lock conflict, retrying",
+				"order id", id,
+				"attempt", attempt+1,
+				"max_retries", maxRetries)
 			continue
+
 		}
 
+		uc.log.Error("exceeded max retries due to concurrent updates",
+			"order_id", id,
+			"max_retries", maxRetries)
 		return fmt.Errorf("update order status: %w", err)
 	}
 

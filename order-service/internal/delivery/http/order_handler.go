@@ -3,7 +3,7 @@ package http
 import (
 	"KolinMarket/internal/domain"
 	"KolinMarket/internal/ports"
-	"log"
+	"log/slog"
 	"strconv"
 
 	"errors"
@@ -13,11 +13,12 @@ import (
 )
 
 type OrderHandler struct {
-	uc ports.OrderUseCase
+	uc  ports.OrderUseCase
+	log *slog.Logger
 }
 
-func NewOrderHandler(uc ports.OrderUseCase) *OrderHandler {
-	return &OrderHandler{uc: uc}
+func NewOrderHandler(uc ports.OrderUseCase, log *slog.Logger) *OrderHandler {
+	return &OrderHandler{uc: uc, log: log}
 }
 
 func (h *OrderHandler) RegisterRoutes(rg *gin.RouterGroup) {
@@ -84,12 +85,11 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		Items:      items,
 	})
 	if err != nil {
-		// В шаге 3 добавим маппинг конкретных domain-ошибок на HTTP-коды подробнее.
 		if errors.Is(err, domain.ErrEmptyItems) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		log.Printf("create order error: %v", err)
+		h.log.Error("create order failed", "error", err, "customer_id", req.CustomerID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
@@ -102,6 +102,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 
 	order, err := h.uc.GetOrder(c.Request.Context(), id)
 	if err != nil {
+		h.log.Warn("get order failed", "error", err, "order_id", id)
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
 	}
@@ -116,13 +117,15 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 		return
 	}
 	cursor := c.Query("cursor")
+
 	limit, err := strconv.Atoi(c.Query("limit"))
 	if err != nil {
-		log.Fatalf("Ошибка конвертации limit из query: %v", err)
+		limit = 0
 	}
 
 	orders, nextCursor, err := h.uc.ListOrders(c.Request.Context(), customerID, cursor, limit)
 	if err != nil {
+		h.log.Error("list orders failed", "error", err, "customer_id", customerID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}

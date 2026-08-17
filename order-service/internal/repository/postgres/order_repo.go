@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -15,10 +16,11 @@ import (
 
 type orderRepository struct {
 	pool *pgxpool.Pool
+	log  *slog.Logger
 }
 
-func NewOrderRepository(pool *pgxpool.Pool) *orderRepository {
-	return &orderRepository{pool: pool}
+func NewOrderRepository(pool *pgxpool.Pool, log *slog.Logger) *orderRepository {
+	return &orderRepository{pool: pool, log: log}
 }
 
 func (r *orderRepository) SaveWithEvent(ctx context.Context, order *domain.Order, eventType string, payload []byte) error {

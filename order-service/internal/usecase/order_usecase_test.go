@@ -5,6 +5,8 @@ import (
 	"KolinMarket/internal/ports"
 	"KolinMarket/internal/ports/mocks"
 	"encoding/json"
+	"io"
+	"log/slog"
 
 	"context"
 	"errors"
@@ -15,6 +17,10 @@ import (
 
 	"go.uber.org/mock/gomock"
 )
+
+func newTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func TestOrderUseCase_CreateOrder(t *testing.T) {
 	tests := []struct {
@@ -89,7 +95,7 @@ func TestOrderUseCase_CreateOrder(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			mockRepo := mocks.NewMockOrderRepository(ctrl)
 			tt.setupMock(t, mockRepo)
-			uc := NewOrderUseCase(mockRepo)
+			uc := NewOrderUseCase(mockRepo, newTestLogger())
 
 			order, err := uc.CreateOrder(context.Background(), tt.input)
 
@@ -213,7 +219,7 @@ func TestOrderUseCase_UpdateOrderStatus(t *testing.T) {
 			// Arrange: что здесь нужно создать/подготовить?
 			ctrl := gomock.NewController(t)
 			mockRepo := mocks.NewMockOrderRepository(ctrl)
-			uc := NewOrderUseCase(mockRepo)
+			uc := NewOrderUseCase(mockRepo, newTestLogger())
 			tt.setupMock(t, mockRepo)
 
 			// Act: какой вызов?

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +20,7 @@ import (
 	grpcclient "api-gateway/internal/client/grpc"
 	deliveryhttp "api-gateway/internal/delivery/http"
 	"api-gateway/internal/delivery/http/middleware"
+	"api-gateway/internal/logger"
 	"api-gateway/internal/ratelimit"
 )
 
@@ -33,6 +33,7 @@ func main() {
 	httpPort := getEnv("HTTP_PORT", "8080")
 	orderServiceAddr := getEnv("ORDER_SERVICE_GRPC_ADDR", "localhost:9091")
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379") // НОВОЕ
+	log := logger.New("api-gateway")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM) // ИЗМЕНЕНО: унифицировано с остальными сервисами
 	defer stop()
@@ -40,7 +41,8 @@ func main() {
 	// --- gRPC-клиент к Order Service.
 	orderClient, err := grpcclient.NewOrderClient(orderServiceAddr)
 	if err != nil {
-		log.Fatalf("failed to create order client: %v", err)
+		log.Error("failed to create order client", "error", err)
+		os.Exit(1)
 	}
 	defer orderClient.Close()
 
@@ -57,7 +59,7 @@ func main() {
 
 	// --- DI: клиент -> хендлер. Хендлер зависит от ports.OrderClient (интерфейса),
 	// grpcclient.OrderClient просто случайно ему удовлетворяет по структуре методов.
-	orderHandler := deliveryhttp.NewOrderHandler(orderClient, orderCache)
+	orderHandler := deliveryhttp.NewOrderHandler(orderClient, orderCache, log)
 
 	router := gin.Default()
 	router.Use(middleware.RateLimit(limiter))                                 // НОВОЕ: применяется ко ВСЕМ роутам глобально
@@ -77,24 +79,27 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("gateway listening on :%s", httpPort)
+		log.Info("gateway listening", "port", httpPort)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
+			log.Error("listen failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done()
 
-	log.Println("shutting down gateway...")
+	log.Info("shutting down gateway")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("gateway forced to shutdown: %v", err)
+		// ИЗМЕНЕНО: было Fatalf (немедленный os.Exit, минуя defer'ы orderClient.Close()/redisClient.Close())
+		// -> Error, чтобы соединения всё равно закрылись перед выходом из main.
+		log.Error("gateway forced to shutdown", "error", err)
 	}
 
-	log.Println("gateway exited gracefully")
+	log.Info("gateway exited gracefully")
 }
 
 func getEnv(key, fallback string) string {

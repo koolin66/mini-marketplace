@@ -1,7 +1,7 @@
 package http
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -16,10 +16,11 @@ import (
 type OrderHandler struct {
 	orderClient ports.OrderClient
 	cache       *cache.RedisCache
+	log         *slog.Logger
 }
 
-func NewOrderHandler(orderClient ports.OrderClient, cache *cache.RedisCache) *OrderHandler {
-	return &OrderHandler{orderClient: orderClient, cache: cache}
+func NewOrderHandler(orderClient ports.OrderClient, cache *cache.RedisCache, log *slog.Logger) *OrderHandler {
+	return &OrderHandler{orderClient: orderClient, cache: cache, log: log}
 }
 
 func (h *OrderHandler) RegisterRoutes(rg *gin.RouterGroup) {
@@ -161,7 +162,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 		// Redis недоступен — НЕ падаем, просто логируем и идём в Order Service напрямую.
 		// Кэш — это оптимизация, а не источник правды; его недоступность не должна
 		// ронять основной функционал.
-		log.Printf("cache get error: %v", err)
+		h.log.Warn("cache get error", "error", err)
 	} else if found {
 		c.JSON(http.StatusOK, cached)
 		return
@@ -178,7 +179,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 
 	// 3. Кладём в кэш для следующих запросов. Ошибку тоже не считаем фатальной.
 	if err := h.cache.Set(c.Request.Context(), cacheKey, result); err != nil {
-		log.Printf("cache set error: %v", err)
+		h.log.Warn("cache set error", "error", err)
 	}
 
 	c.JSON(http.StatusOK, result)

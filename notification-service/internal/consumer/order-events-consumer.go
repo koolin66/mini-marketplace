@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -23,9 +23,10 @@ type OrderEvent struct {
 type OrderEventsConsumer struct {
 	readers []*kafka.Reader
 	uc      ports.NotificationUseCase
+	log     *slog.Logger
 }
 
-func NewOrderEventsConsumer(brokers []string, groupID string, uc ports.NotificationUseCase) *OrderEventsConsumer {
+func NewOrderEventsConsumer(brokers []string, groupID string, uc ports.NotificationUseCase, log *slog.Logger) *OrderEventsConsumer {
 	topics := []string{"order.created", "order.confirmed", "order.cancelled"}
 
 	readers := make([]*kafka.Reader, 0, len(topics))
@@ -37,7 +38,7 @@ func NewOrderEventsConsumer(brokers []string, groupID string, uc ports.Notificat
 		}))
 	}
 
-	return &OrderEventsConsumer{readers: readers, uc: uc}
+	return &OrderEventsConsumer{readers: readers, uc: uc, log: log}
 }
 
 func (c *OrderEventsConsumer) Close() error {
@@ -56,12 +57,12 @@ func (c *OrderEventsConsumer) Run(ctx context.Context) {
 		go c.consumeLoop(ctx, reader)
 	}
 	<-ctx.Done()
-	log.Println("order events consumer: stopping")
+	c.log.Info("order events consumer stopping")
 }
 
 func (c *OrderEventsConsumer) consumeLoop(ctx context.Context, reader *kafka.Reader) {
 	topic := reader.Config().Topic
-	log.Printf("%s consumer started", topic)
+	c.log.Info("topic consumer started", "topic", topic)
 
 	for {
 		msg, err := reader.FetchMessage(ctx)
@@ -69,17 +70,17 @@ func (c *OrderEventsConsumer) consumeLoop(ctx context.Context, reader *kafka.Rea
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			log.Printf("%s consumer: fetch error: %v", topic, err)
+			c.log.Error("topic consumer fetch failed", "topic", topic, "error", err)
 			continue
 		}
 
 		if err := c.handleMessage(ctx, topic, msg); err != nil {
-			log.Printf("%s consumer: handle error: %v", topic, err)
+			c.log.Error("topic consumer handle failed", "topic", topic, "error", err)
 			continue // не коммитим — ретрай
 		}
 
 		if err := reader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("%s consumer: commit error: %v", topic, err)
+			c.log.Error("topic consumer commit failed", "topic", topic, "error", err)
 		}
 	}
 }
@@ -89,7 +90,7 @@ func (c *OrderEventsConsumer) handleMessage(ctx context.Context, topic string, m
 
 	var event OrderEvent
 	if err := json.Unmarshal(msg.Value, &event); err != nil {
-		log.Printf("%s consumer: failed to unmarshal: %v", topic, err)
+		c.log.Error("topic consumer failed to unmarshal", "topic", topic, "error", err)
 		metrics.NotificationsProcessedTotal.WithLabelValues(topic, "unmarshal_error").Inc()
 		return nil // poison pill — коммитим и идём дальше
 	}
@@ -100,7 +101,7 @@ func (c *OrderEventsConsumer) handleMessage(ctx context.Context, topic string, m
 
 	if err != nil {
 		if errors.Is(err, ports.ErrAlreadyProcessed) {
-			log.Printf("%s consumer: order %s already notified, skipping", topic, event.OrderID)
+			c.log.Warn("topic consumer: order already notified, skipping", "topic", topic, "order_id", event.OrderID)
 			metrics.NotificationsProcessedTotal.WithLabelValues(topic, "already_processed").Inc()
 			return nil
 		}

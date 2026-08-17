@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,10 +14,11 @@ import (
 
 type inboxRepository struct {
 	pool *pgxpool.Pool
+	log  *slog.Logger
 }
 
-func NewInboxRepository(pool *pgxpool.Pool) *inboxRepository {
-	return &inboxRepository{pool: pool}
+func NewInboxRepository(pool *pgxpool.Pool, log *slog.Logger) *inboxRepository {
+	return &inboxRepository{pool: pool, log: log}
 }
 
 func (r *inboxRepository) MarkProcessedAndNotify(ctx context.Context, orderID string, eventType string, message string) error {
@@ -42,9 +43,9 @@ func (r *inboxRepository) MarkProcessedAndNotify(ctx context.Context, orderID st
 
 	// "Отправка" уведомления — в проде тут был бы вызов email/push-сервиса.
 	// Раз мы решили сохранить транзакционность, эта "отправка" логически внутри tx —
-	// хотя реального отката для log.Printf не бывает, паттерн остаётся готовым
-	// на будущее (если log.Printf заменится на реальный вызов с возможностью ошибки).
-	log.Printf("[NOTIFICATION] order=%s event=%s message=%q", orderID, eventType, message)
+	// хотя реального отката для лога не бывает, паттерн остаётся готовым
+	// на будущее (если этот вызов заменится на реальный с возможностью ошибки).
+	r.log.Info("notification sent", "order_id", orderID, "event_type", eventType, "message", message)
 
 	return tx.Commit(ctx)
 }

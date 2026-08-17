@@ -2,7 +2,7 @@ package outbox
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,10 +21,11 @@ type Worker struct {
 	publisher *Publisher
 	interval  time.Duration
 	batchSize int
+	log       *slog.Logger
 }
 
-func NewWorker(pool *pgxpool.Pool, publisher *Publisher, interval time.Duration, batchSize int) *Worker {
-	return &Worker{pool: pool, publisher: publisher, interval: interval, batchSize: batchSize}
+func NewWorker(pool *pgxpool.Pool, publisher *Publisher, interval time.Duration, batchSize int, log *slog.Logger) *Worker {
+	return &Worker{pool: pool, publisher: publisher, interval: interval, batchSize: batchSize, log: log}
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -34,11 +35,11 @@ func (w *Worker) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("outbox worker: stopping")
+			w.log.Info("outbox worker stopping")
 			return
 		case <-ticker.C:
 			if err := w.processBatch(ctx); err != nil {
-				log.Printf("outbox worker: process batch error: %v", err)
+				w.log.Error("outbox worker process batch failed", "error", err)
 			}
 		}
 	}
@@ -60,7 +61,7 @@ func (w *Worker) processBatch(ctx context.Context) error {
 		topic := rec.EventType
 
 		if err := w.publisher.Publish(ctx, rec.AggregateID, topic, rec.Payload); err != nil {
-			log.Printf("outbox worker: failed to publish record %s: %v", rec.ID, err)
+			w.log.Error("outbox worker failed to publish record", "record_id", rec.ID, "error", err)
 			return err
 		}
 

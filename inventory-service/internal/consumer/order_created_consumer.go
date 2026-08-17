@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -36,9 +36,10 @@ type OrderCreatedItem struct {
 type OrderCreatedConsumer struct {
 	reader *kafka.Reader
 	uc     ports.InventoryUseCase
+	log    *slog.Logger
 }
 
-func NewOrderCreatedConsumer(brokers []string, groupID string, uc ports.InventoryUseCase) *OrderCreatedConsumer {
+func NewOrderCreatedConsumer(brokers []string, groupID string, uc ports.InventoryUseCase, log *slog.Logger) *OrderCreatedConsumer {
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers: brokers,
 		Topic:   "order.created",
@@ -47,7 +48,7 @@ func NewOrderCreatedConsumer(brokers []string, groupID string, uc ports.Inventor
 		// каждое сообщение обработается ровно одним инстансом группы)
 	})
 
-	return &OrderCreatedConsumer{reader: reader, uc: uc}
+	return &OrderCreatedConsumer{reader: reader, uc: uc, log: log}
 }
 
 func (c *OrderCreatedConsumer) Close() error {
@@ -56,7 +57,7 @@ func (c *OrderCreatedConsumer) Close() error {
 
 // Run — блокирующий цикл чтения. Останавливается через отмену ctx (graceful shutdown).
 func (c *OrderCreatedConsumer) Run(ctx context.Context) {
-	log.Println("order.created consumer started")
+	c.log.Info("order.created consumer started")
 
 	for {
 		// FetchMessage — читает следующее сообщение, НЕ коммитит offset автоматически.
@@ -64,15 +65,15 @@ func (c *OrderCreatedConsumer) Run(ctx context.Context) {
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				log.Println("order.created consumer: context cancelled, stopping")
+				c.log.Info("order.created consumer: context cancelled, stopping")
 				return
 			}
-			log.Printf("order.created consumer: fetch error: %v", err)
+			c.log.Error("order.created consumer fetch failed", "error", err)
 			continue
 		}
 
 		if err := c.handleMessage(ctx, msg); err != nil {
-			log.Printf("order.created consumer: handle error: %v", err)
+			c.log.Error("order.created consumer handle failed", "error", err)
 			// НЕ коммитим offset при ошибке обработки — сообщение будет доставлено повторно
 			// при следующем перезапуске/ребалансе. Это и есть at-least-once на стороне consumer'а.
 			continue
@@ -81,7 +82,7 @@ func (c *OrderCreatedConsumer) Run(ctx context.Context) {
 		// Коммитим offset ТОЛЬКО после успешной обработки (включая случай дубликата,
 		// см. handleMessage — там ErrAlreadyProcessed тоже считается "успехом" для коммита).
 		if err := c.reader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("order.created consumer: commit error: %v", err)
+			c.log.Error("order.created consumer commit failed", "error", err)
 		}
 	}
 }
@@ -95,7 +96,7 @@ func (c *OrderCreatedConsumer) handleMessage(ctx context.Context, msg kafka.Mess
 		// (сообщение, которое никогда не станет валидным при повторной попытке).
 		// Логируем как критическую проблему, но НЕ ретраим бесконечно — considerations
 		// про dead-letter queue см. ниже в вопросе.
-		log.Printf("order.created consumer: failed to unmarshal message: %v", err)
+		c.log.Error("order.created consumer failed to unmarshal message", "error", err)
 
 		metrics.MessagesProcessedTotal.WithLabelValues("unmarshal_error").Inc()
 
@@ -113,14 +114,14 @@ func (c *OrderCreatedConsumer) handleMessage(ctx context.Context, msg kafka.Mess
 
 	switch {
 	case err == nil:
-		log.Printf("order.created consumer: reserved stock for order %s", event.OrderID)
+		c.log.Info("order.created consumer reserved stock", "order_id", event.OrderID)
 		metrics.MessagesProcessedTotal.WithLabelValues("reserved").Inc()
 		return nil
 
 	case errors.Is(err, ports.ErrAlreadyProcessed):
 		// Дубликат — не ошибка, просто идемпотентный no-op. Логируем на всякий случай,
 		// но не считаем это проблемой, коммитим offset как обычно.
-		log.Printf("order.created consumer: order %s already processed, skipping", event.OrderID)
+		c.log.Warn("order.created consumer: order already processed, skipping", "order_id", event.OrderID)
 		metrics.MessagesProcessedTotal.WithLabelValues("already_processed").Inc()
 		return nil
 
@@ -128,7 +129,7 @@ func (c *OrderCreatedConsumer) handleMessage(ctx context.Context, msg kafka.Mess
 		// Реальная бизнес-ошибка — товара не хватает. Это НЕ повод ретраить (повторная
 		// попытка ничего не изменит, пока кто-то не пополнит склад) и НЕ повод НЕ коммитить offset —
 		// мы обработали сообщение, просто с бизнес-результатом "отказ".
-		log.Printf("order.created consumer: insufficient stock for order %s: %v", event.OrderID, err)
+		c.log.Warn("order.created consumer: insufficient stock", "order_id", event.OrderID, "error", err)
 		metrics.MessagesProcessedTotal.WithLabelValues("insufficient_stock").Inc()
 		return nil
 
